@@ -13,12 +13,51 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate commit messages
+      - name: Determine commit range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -e
-          BASE="origin/${{ github.base_ref || github.event.repository.default_branch }}"
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              echo "base=origin/$BASE_REF" >> "$GITHUB_OUTPUT"
+              echo "head=HEAD" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
+                # new branch / unknown before — fall back to single latest commit
+                echo "base=HEAD~1" >> "$GITHUB_OUTPUT"
+                echo "head=HEAD" >> "$GITHUB_OUTPUT"
+              else
+                echo "base=$BEFORE" >> "$GITHUB_OUTPUT"
+                echo "head=$AFTER" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              # any other trigger: default to comparing against default branch
+              echo "base=origin/$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+              echo "head=HEAD" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
-          BAD=$(git log --pretty=format:"%H|%s%n%b%n---END---" "$BASE..HEAD" 2>/dev/null \
+      - name: Validate commit messages
+        env:
+          BASE: ${{ steps.range.outputs.base }}
+          HEAD: ${{ steps.range.outputs.head }}
+        run: |
+          set -e
+          # If base is unreachable (force-push, shallow clone), fall back to single commit
+          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+            echo "Base $BASE not reachable, checking single latest commit"
+            BASE="${HEAD}~1"
+          fi
+
+          BAD=$(git log --pretty=format:"%H|%s%n%b%n---END---" "$BASE..$HEAD" 2>/dev/null \
             | grep -iE "co-authored-by:.*(claude|codex|chatgpt|openai|anthropic)|🤖 generated with \[(claude|codex|gpt)" || true)
 
           if [ -n "$BAD" ]; then
@@ -29,7 +68,7 @@ jobs:
           echo "OK"
 
       - name: Validate PR body
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
