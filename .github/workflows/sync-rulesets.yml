@@ -1,21 +1,24 @@
-name: Sync Rulesets from nantokaworks
+name: Propagate rulesets to all repos
 
 on:
+  push:
+    branches: [main]
   schedule:
+    # 毎日 JST 午前3時 (UTC 18:00) にも念のため実行
     - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: "Force re-apply even if hash matches"
+        description: "ハッシュ一致でも強制再適用する"
         type: boolean
         default: false
       dry_run:
-        description: "Dry run (no changes)"
+        description: "ドライラン（変更なし）"
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: write  # ruleset-state.json をコミットするために必要
 
 jobs:
   sync:
@@ -29,13 +32,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync rulesets
+      - name: Propagate rulesets
         env:
           GITHUB_TOKEN: ${{ secrets.RULESET_SYNC_PAT }}
         run: |
           ARGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
           python3 apply_rulesets.py $ARGS
 
       - name: Commit updated state
@@ -43,5 +50,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ruleset-state.json
+          # 変更がなければコミットしない
           git diff --cached --quiet || git commit -m "chore: update ruleset-state.json [skip ci]"
           git push
