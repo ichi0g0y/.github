@@ -27,7 +27,7 @@ SOURCE_REPO    = f"{USER_NAME}/.github"
 API_BASE       = "https://api.github.com"
 WORKFLOWS_PATH = ".github/workflows"
 # 伝播しないファイル（このリポジトリ専用のメタワークフロー）
-SKIP_FILES     = {"sync-rulesets.yml"}
+SKIP_FILES     = {"sync-rulesets.yml", "basic-checks.yml"}
 
 
 def get_token() -> str:
