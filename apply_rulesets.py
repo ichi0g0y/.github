@@ -1,128 +1,271 @@
 #!/usr/bin/env python3
 """
-apply_rulesets.py - nantokaworks org ルールセットを ichi0g0y の全リポジトリに同期する
-ruleset-state.json でハッシュ管理し、変更時のみ適用する
+apply_rulesets.py
+
+ichi0g0y/.github リポジトリに設定されているルールセットを
+ichi0g0y の全リポジトリ（.github 自身を除く）に伝播する。
+ruleset-state.json にハッシュを保存し、変更がある場合のみ適用する。
+
+使い方:
+    export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+    python3 apply_rulesets.py [--dry-run] [--force]
+
+オプション:
+    --dry-run   実際には変更せず、実行内容を表示するだけ
+    --force     ハッシュ一致でも強制的に全リポジトリに再適用する
 """
-import argparse, hashlib, json, os, sys, time, urllib.request, urllib.error
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-ORG_NAME   = "nantokaworks"
-USER_NAME  = "ichi0g0y"
-API_BASE   = "https://api.github.com"
-STATE_FILE = Path(__file__).parent / "ruleset-state.json"
+# ─── 設定 ──────────────────────────────────────────────────────────────────────
 
-def get_token():
+USER_NAME   = "ichi0g0y"
+SOURCE_REPO = f"{USER_NAME}/.github"   # ルールセットの定義元リポジトリ
+API_BASE    = "https://api.github.com"
+STATE_FILE  = Path(__file__).parent / "ruleset-state.json"
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_token() -> str:
     token = os.environ.get("GITHUB_TOKEN", "")
-    if not token: print("GITHUB_TOKEN not set"); sys.exit(1)
+    if not token:
+        print("❌  GITHUB_TOKEN 環境変数が設定されていません。")
+        sys.exit(1)
     return token
 
-def api_request(method, path, token, body=None):
+
+def api_request(method: str, path: str, token: str, body: dict | None = None) -> dict | list:
     url = f"{API_BASE}{path}"
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json",
-        "User-Agent": "apply-rulesets/2.0"})
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "apply-rulesets-script/2.0",
+        },
+    )
     try:
-        with urllib.request.urlopen(req) as resp: return json.loads(resp.read())
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        print(f"HTTP {e.code} {method} {url}\n{e.read().decode()}"); raise
+        body_text = e.read().decode()
+        print(f"❌  HTTP {e.code} {method} {url}\n    {body_text}")
+        raise
 
-def paginate(path, token):
-    results, url = [], f"{API_BASE}{path}?per_page=100"
+
+def paginate(path: str, token: str) -> list:
+    results = []
+    url = f"{API_BASE}{path}?per_page=100"
     while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "apply-rulesets/2.0"})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "apply-rulesets-script/2.0",
+            },
+        )
         with urllib.request.urlopen(req) as resp:
             results.extend(json.loads(resp.read()))
-            link = resp.headers.get("Link", "")
-            url = next((p.split(";")[0].strip().strip("<>") for p in link.split(",") if 'rel="next"' in p), None)
+            url = _next_url(resp.headers.get("Link", ""))
     return results
 
-def compute_hash(detail):
-    snap = {"name": detail.get("name"), "target": detail.get("target"),
-        "enforcement": detail.get("enforcement"),
-        "rules": sorted([{k:v for k,v in r.items() if k!="ruleset_id"} for r in detail.get("rules",[])],
-            key=lambda x: json.dumps(x, sort_keys=True)),
-        "bypass_actors": detail.get("bypass_actors",[]), "conditions": detail.get("conditions",{})}
-    return hashlib.sha256(json.dumps(snap, sort_keys=True).encode()).hexdigest()
 
-def load_state():
-    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"rulesets":{}, "last_applied":None}
+def _next_url(link_header: str) -> str | None:
+    for part in link_header.split(","):
+        if 'rel="next"' in part:
+            return part.split(";")[0].strip().strip("<>")
+    return None
 
-def save_state(state, dry_run):
-    if dry_run: return
+
+# ─── ハッシュ・バージョン管理 ────────────────────────────────────────────────
+
+def compute_hash(ruleset_detail: dict) -> str:
+    """ルールセットの中身（name / target / enforcement / rules / conditions）からハッシュを生成する。"""
+    snapshot = {
+        "name":        ruleset_detail.get("name"),
+        "target":      ruleset_detail.get("target"),
+        "enforcement": ruleset_detail.get("enforcement"),
+        "rules":       sorted(
+            [{k: v for k, v in r.items() if k != "ruleset_id"} for r in ruleset_detail.get("rules", [])],
+            key=lambda x: json.dumps(x, sort_keys=True),
+        ),
+        "bypass_actors": ruleset_detail.get("bypass_actors", []),
+        "conditions":  ruleset_detail.get("conditions", {}),
+    }
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {"rulesets": {}, "last_applied": None}
+
+
+def save_state(state: dict, dry_run: bool):
+    if dry_run:
+        return
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
-    print("ruleset-state.json updated")
+    print(f"💾  ruleset-state.json を更新しました。")
 
-def fetch_org_rulesets(token):
-    print(f"Fetching {ORG_NAME} rulesets...")
-    summaries = paginate(f"/orgs/{ORG_NAME}/rulesets", token)
+
+# ─── GitHub API 操作 ──────────────────────────────────────────────────────────
+
+def fetch_source_ruleset_details(token: str) -> list[dict]:
+    """SOURCE_REPO (.github) に設定されているルールセットを取得する。"""
+    print(f"📋  {SOURCE_REPO} のルールセットを取得中...")
+    summaries = paginate(f"/repos/{SOURCE_REPO}/rulesets", token)
     details = []
     for rs in summaries:
-        if rs.get("target") == "repository": print(f"  skip {rs['name']}"); continue
-        details.append(api_request("GET", f"/orgs/{ORG_NAME}/rulesets/{rs['id']}", token))
-    print(f"  {len(details)} rulesets fetched")
+        detail = api_request("GET", f"/repos/{SOURCE_REPO}/rulesets/{rs['id']}", token)
+        details.append(detail)
+    print(f"   → {len(details)} 件取得完了")
     return details
 
-def fetch_user_repos(token):
-    print(f"Fetching {USER_NAME} repos...")
+
+def fetch_user_repos(token: str) -> list[dict]:
+    print(f"\n📦  {USER_NAME} のリポジトリ一覧を取得中...")
+    # 自分のリポジトリ（private 含む）を取得するには /user/repos を使う
     repos = paginate("/user/repos", token)
-    repos = [r for r in repos if r["owner"]["login"]==USER_NAME and not r.get("fork") and not r.get("archived")]
-    print(f"  {len(repos)} repos (public+private, excl fork/archived)")
+    repos = [
+        r for r in repos
+        if r["owner"]["login"] == USER_NAME
+        and not r.get("fork")
+        and not r.get("archived")
+        and r["full_name"] != SOURCE_REPO   # 定義元リポジトリ自身は除外
+    ]
+    print(f"   → {len(repos)} 件 (fork/archived/.github 除外, public + private 含む)")
     return repos
 
-def build_payload(detail):
-    p = {"name":detail["name"],"target":detail.get("target","branch"),
-        "enforcement":detail.get("enforcement","active"),
-        "rules":detail.get("rules",[]),"bypass_actors":detail.get("bypass_actors",[])}
-    ref = detail.get("conditions",{}).get("ref_name")
-    if ref: p["conditions"] = {"ref_name": ref}
-    return p
 
-def sync_to_repo(repo_full, payload, token, dry_run):
+def build_repo_payload(detail: dict) -> dict:
+    payload = {
+        "name":          detail["name"],
+        "target":        detail.get("target", "branch"),
+        "enforcement":   detail.get("enforcement", "active"),
+        "rules":         detail.get("rules", []),
+        "bypass_actors": detail.get("bypass_actors", []),
+    }
+    ref_name = detail.get("conditions", {}).get("ref_name")
+    if ref_name:
+        payload["conditions"] = {"ref_name": ref_name}
+    return payload
+
+
+def sync_ruleset_to_repo(repo_full: str, payload: dict, token: str, dry_run: bool) -> str:
     name = payload["name"]
     existing_id = None
     try:
         for r in api_request("GET", f"/repos/{repo_full}/rulesets", token):
-            if r["name"] == name: existing_id = r["id"]; break
-    except: pass
-    if dry_run: return f"[DRY] {'update' if existing_id else 'create'}: {repo_full}/{name}"
+            if r["name"] == name:
+                existing_id = r["id"]
+                break
+    except Exception:
+        pass
+
+    if dry_run:
+        action = "更新" if existing_id else "作成"
+        return f"[DRY-RUN] {action}: {repo_full} / {name}"
+
     if existing_id:
         api_request("PUT", f"/repos/{repo_full}/rulesets/{existing_id}", token, payload)
-        return f"updated: {repo_full}/{name}"
+        return f"✅  更新: {repo_full} / {name}"
     else:
         api_request("POST", f"/repos/{repo_full}/rulesets", token, payload)
-        return f"created: {repo_full}/{name}"
+        return f"✅  作成: {repo_full} / {name}"
+
+
+# ─── メイン ──────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--dry-run",action="store_true"); p.add_argument("--force",action="store_true")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dry-run", action="store_true", help="変更せずに実行内容を表示するだけ")
+    parser.add_argument("--force",   action="store_true", help="ハッシュ一致でも強制再適用")
+    args = parser.parse_args()
+
     token = get_token()
-    org_details = fetch_org_rulesets(token)
-    if not org_details: print("No rulesets found."); return
-    current = {d["name"]: compute_hash(d) for d in org_details}
-    state = load_state(); saved = state.get("rulesets",{})
-    changed = {n:h for n,h in current.items() if args.force or saved.get(n)!=h}
-    unchanged = [n for n in current if n not in changed]
-    for n in unchanged: print(f"  unchanged: {n}")
-    for n in changed: print(f"  {'NEW' if n not in saved else 'CHANGED'}: {n}")
-    if not changed: print("No changes, skipping."); return
+
+    if args.dry_run:
+        print("🔍  ドライランモード\n")
+
+    # 1. .github リポジトリのルールセット取得
+    source_details = fetch_source_ruleset_details(token)
+    if not source_details:
+        print("ℹ️   適用対象のルールセットがありません。終了します。")
+        return
+
+    # 2. ハッシュ計算
+    current_hashes = {d["name"]: compute_hash(d) for d in source_details}
+
+    # 3. 保存済みハッシュと比較
+    state = load_state()
+    saved_hashes = state.get("rulesets", {})
+
+    changed = {
+        name: h for name, h in current_hashes.items()
+        if args.force or saved_hashes.get(name) != h
+    }
+    unchanged = [name for name in current_hashes if name not in changed]
+
+    print(f"\n🔍  ハッシュ比較:")
+    for name in unchanged:
+        print(f"   ✓ 変更なし: {name}")
+    for name in changed:
+        status = "NEW" if name not in saved_hashes else "CHANGED"
+        print(f"   ★ {status}: {name}")
+
+    if not changed:
+        print("\n✨  ルールセットに変更なし — 全リポジトリへの適用をスキップします。")
+        return
+
+    # 4. 変更があったルールセットのみ適用
+    changed_details = [d for d in source_details if d["name"] in changed]
     repos = fetch_user_repos(token)
-    changed_details = [d for d in org_details if d["name"] in changed]
-    print(f"Applying {len(changed_details)} rulesets to {len(repos)} repos...")
+
+    print(f"\n🚀  {len(repos)} リポジトリ × {len(changed_details)} ルールセットを適用します...\n")
     errors = []
+
     for repo in repos:
         for detail in changed_details:
-            try: print(f"  {sync_to_repo(repo['full_name'], build_payload(detail), token, args.dry_run)}")
-            except Exception as e: errors.append(str(e)); print(f"  FAIL: {e}")
+            payload = build_repo_payload(detail)
+            try:
+                msg = sync_ruleset_to_repo(repo["full_name"], payload, token, args.dry_run)
+                print(f"   {msg}")
+            except Exception as e:
+                err = f"❌  失敗: {repo['full_name']} / {detail['name']} — {e}"
+                print(f"   {err}")
+                errors.append(err)
             time.sleep(0.3)
-    if not errors:
-        state["rulesets"] = current; state["last_applied"] = datetime.now(timezone.utc).isoformat()
-        save_state(state, args.dry_run)
-    else: print(f"{len(errors)} errors - state not updated"); sys.exit(1)
-    print(f"Done: {len(repos)*len(changed_details)-len(errors)}/{len(repos)*len(changed_details)} ok")
 
-if __name__ == "__main__": main()
+    # 5. state.json 更新
+    if not errors:
+        state["rulesets"] = current_hashes
+        state["last_applied"] = datetime.now(timezone.utc).isoformat()
+        save_state(state, args.dry_run)
+    else:
+        print(f"\n⚠️   {len(errors)} 件の失敗があったため state.json は更新しません（次回再試行されます）")
+
+    # 6. サマリー
+    total = len(repos) * len(changed_details)
+    print(f"\n{'─'*60}")
+    print(f"完了: {total - len(errors)}/{total} 件成功 {'(DRY-RUN)' if args.dry_run else ''}")
+    if errors:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
