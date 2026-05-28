@@ -2,7 +2,7 @@
 """
 apply_rulesets.py
 
-rulesets/*.json に保存されたルールセット定義を
+ichi0g0y/.github リポジトリに設定されているルールセット定義を
 ichi0g0y の全リポジトリ（.github 自身を除く）に伝播する。
 ruleset-state.json にハッシュを保存し、変更がある場合のみ適用する。
 
@@ -28,11 +28,10 @@ from pathlib import Path
 
 # ─── 設定 ──────────────────────────────────────────────────────────────────────
 
-USER_NAME    = "ichi0g0y"
-SOURCE_REPO  = f"{USER_NAME}/.github"   # 定義元リポジトリ（除外用）
-API_BASE     = "https://api.github.com"
-STATE_FILE   = Path(__file__).parent / "ruleset-state.json"
-RULESETS_DIR = Path(__file__).parent / "rulesets"   # ルールセット定義JSONディレクトリ
+USER_NAME   = "ichi0g0y"
+SOURCE_REPO = f"{USER_NAME}/.github"   # 定義元リポジトリ（除外用）
+API_BASE    = "https://api.github.com"
+STATE_FILE  = Path(__file__).parent / "ruleset-state.json"
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -127,18 +126,21 @@ def save_state(state: dict, dry_run: bool):
 # ─── GitHub API 操作 ──────────────────────────────────────────────────────────
 
 def fetch_source_ruleset_details(token: str) -> list[dict]:
-    """rulesets/*.json からルールセット定義を読み込む（APIは使わない）。
-    これにより .github リポジトリ自身にルールセットを作成せず、
-    ブランチ保護による循環問題を回避する。
-    """
-    print(f"📋  {RULESETS_DIR}/ からルールセット定義を読み込み中...")
-    if not RULESETS_DIR.exists() or not any(RULESETS_DIR.glob("*.json")):
-        print(f"   → 定義ファイルが見つかりません。import ジョブを先に実行してください。")
+    """ichi0g0y/.github リポジトリからルールセット定義を API で取得する。"""
+    print(f"📋  {SOURCE_REPO} からルールセット定義を取得中 (API)...")
+    try:
+        rulesets = api_request("GET", f"/repos/{SOURCE_REPO}/rulesets", token)
+    except Exception:
+        print(f"   → ルールセット一覧の取得に失敗しました。")
+        return []
+    if not rulesets:
+        print(f"   → .github にルールセットがありません。import ジョブを先に実行してください。")
         return []
     details = []
-    for f in sorted(RULESETS_DIR.glob("*.json")):
-        details.append(json.loads(f.read_text()))
-    print(f"   → {len(details)} 件読み込み完了: {[d['name'] for d in details]}")
+    for rs in rulesets:
+        detail = api_request("GET", f"/repos/{SOURCE_REPO}/rulesets/{rs['id']}", token)
+        details.append(detail)
+    print(f"   → {len(details)} 件取得完了: {[d['name'] for d in details]}")
     return details
 
 
@@ -207,7 +209,7 @@ def main():
     if args.dry_run:
         print("🔍  ドライランモード\n")
 
-    # 1. rulesets/*.json からルールセット定義を読み込む
+    # 1. .github リポジトリのルールセット取得（API）
     org_details = fetch_source_ruleset_details(token)
     if not org_details:
         print("ℹ️   適用対象のルールセットがありません。終了します。")
