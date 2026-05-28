@@ -139,16 +139,17 @@ def fetch_source_ruleset_details(token: str) -> list[dict]:
 
 def fetch_user_repos(token: str) -> list[dict]:
     print(f"\n📦  {USER_NAME} のリポジトリ一覧を取得中...")
-    # 自分のリポジトリ（private 含む）を取得するには /user/repos を使う
+    # 自分のリポジトリを取得するには /user/repos を使う
     repos = paginate("/user/repos", token)
     repos = [
         r for r in repos
         if r["owner"]["login"] == USER_NAME
         and not r.get("fork")
         and not r.get("archived")
+        and not r.get("private")            # GitHub Free はプライベートリポジトリにルールセット不可
         and r["full_name"] != SOURCE_REPO   # 定義元リポジトリ自身は除外
     ]
-    print(f"   → {len(repos)} 件 (fork/archived/.github 除外, public + private 含む)")
+    print(f"   → {len(repos)} 件 (fork/archived/private/.github 除外, publicのみ)")
     return repos
 
 
@@ -203,13 +204,13 @@ def main():
         print("🔍  ドライランモード\n")
 
     # 1. .github リポジトリのルールセット取得
-    source_details = fetch_source_ruleset_details(token)
-    if not source_details:
+    org_details = fetch_source_ruleset_details(token)
+    if not org_details:
         print("ℹ️   適用対象のルールセットがありません。終了します。")
         return
 
     # 2. ハッシュ計算
-    current_hashes = {d["name"]: compute_hash(d) for d in source_details}
+    current_hashes = {d["name"]: compute_hash(d) for d in org_details}
 
     # 3. 保存済みハッシュと比較
     state = load_state()
@@ -233,7 +234,7 @@ def main():
         return
 
     # 4. 変更があったルールセットのみ適用
-    changed_details = [d for d in source_details if d["name"] in changed]
+    changed_details = [d for d in org_details if d["name"] in changed]
     repos = fetch_user_repos(token)
 
     print(f"\n🚀  {len(repos)} リポジトリ × {len(changed_details)} ルールセットを適用します...\n")
