@@ -1,4 +1,5 @@
 name: Propagate rulesets to all repos
+
 on:
   push:
     branches: [main]
@@ -34,11 +35,11 @@ jobs:
           python3 - <<'EOF'
           import json, os, urllib.request, urllib.error
 
-          ORG_NAME    = "nantokaworks"
-          DEST_OWNER  = "ichi0g0y"
-          DEST_REPO   = ".github"
-          API_BASE    = "https://api.github.com"
-          token       = os.environ["GITHUB_TOKEN"]
+          ORG_NAME   = "nantokaworks"
+          DEST_OWNER = "ichi0g0y"
+          DEST_REPO  = ".github"
+          API_BASE   = "https://api.github.com"
+          token      = os.environ["GITHUB_TOKEN"]
 
           BYPASS_ACTORS = [
               {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
@@ -62,21 +63,18 @@ jobs:
                   print(f"HTTP {e.code} {method} {url}: {e.read().decode()}")
                   raise
 
-          # 1. nantokaworks のルールセット一覧を取得
-          print("📋  nantokaworks のルールセットを取得中...")
+          print("📋 nantokaworks のルールセットを取得中...")
           org_rulesets = api("GET", f"/orgs/{ORG_NAME}/rulesets")
-          print(f"   -> {len(org_rulesets)} 件: {[r['name'] for r in org_rulesets]}")
+          print(f" -> {len(org_rulesets)} 件: {[r['name'] for r in org_rulesets]}")
 
-          # 2. 各ルールセットの詳細を取得して .github に適用
           for rs in org_rulesets:
               detail = api("GET", f"/orgs/{ORG_NAME}/rulesets/{rs['id']}")
               name   = detail["name"]
-
               payload = {
-                  "name":          detail["name"],
-                  "target":        detail.get("target", "branch"),
-                  "enforcement":   detail.get("enforcement", "active"),
-                  "rules":         detail.get("rules", []),
+                  "name":        detail["name"],
+                  "target":      detail.get("target", "branch"),
+                  "enforcement": detail.get("enforcement", "active"),
+                  "rules":       detail.get("rules", []),
                   "bypass_actors": BYPASS_ACTORS,
               }
               ref_name = detail.get("conditions", {}).get("ref_name")
@@ -88,10 +86,10 @@ jobs:
 
               if existing_id:
                   api("PUT", f"/repos/{DEST_OWNER}/{DEST_REPO}/rulesets/{existing_id}", payload)
-                  print(f"✅  更新: {DEST_REPO}/{name}")
+                  print(f"✅ 更新: {DEST_REPO}/{name}")
               else:
                   api("POST", f"/repos/{DEST_OWNER}/{DEST_REPO}/rulesets", payload)
-                  print(f"✅  作成: {DEST_REPO}/{name}")
+                  print(f"✅ 作成: {DEST_REPO}/{name}")
 
           print("\n完了: .github にルールセットを適用しました。")
           EOF
@@ -110,7 +108,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RULESET_SYNC_PAT }}
         run: |
           # .github のブランチ保護で push できないため --force で常に全適用
-          # state.json のコミットは行わない（ルールセット適用はべき等）
           ARGS="--force"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python3 apply_rulesets.py $ARGS
+
+  # ── sync-workflows: .github のワークフローを全リポジトリに伝播 ───────────────
+  sync-workflows:
+    if: ${{ github.event.inputs.import_from_nantokaworks != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Propagate workflows
+        env:
+          GITHUB_TOKEN: ${{ secrets.RULESET_SYNC_PAT }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          python3 apply_workflows.py $ARGS
