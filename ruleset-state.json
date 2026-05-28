@@ -1,4 +1,6 @@
 {
-  "rulesets": {},
-  "last_applied": null
+  "rulesets": {
+    "protect-branches": "182e6e5020b150b6dcc51fe35d7d7daf26cb05cb4394a2e42bf93f2cd2bba554"
+  },
+  "last_applied": "2026-05-28T05:47:48.833779+00:00"
 }
