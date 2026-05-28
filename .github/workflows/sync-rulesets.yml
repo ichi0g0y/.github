@@ -4,10 +4,13 @@ on:
   push:
     branches: [main]
   schedule:
-    # 毎日 JST 午前3時 (UTC 18:00) にも念のため実行
     - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
+      import_from_nantokaworks:
+        description: "nantokaworks からルールをインポートして .github に設定する（初回のみ）"
+        type: boolean
+        default: false
       force:
         description: "ハッシュ一致でも強制再適用する"
         type: boolean
@@ -18,10 +21,28 @@ on:
         default: false
 
 permissions:
-  contents: write  # ruleset-state.json をコミットするために必要
+  contents: write
 
 jobs:
+  import:
+    if: ${{ github.event.inputs.import_from_nantokaworks == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import rulesets from nantokaworks to .github
+        env:
+          GITHUB_TOKEN: ${{ secrets.RULESET_SYNC_PAT }}
+        run: python3 import_from_nantokaworks.py
+
   sync:
+    if: ${{ github.event.inputs.import_from_nantokaworks != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -50,6 +71,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ruleset-state.json
-          # 変更がなければコミットしない
           git diff --cached --quiet || git commit -m "chore: update ruleset-state.json [skip ci]"
           git push
