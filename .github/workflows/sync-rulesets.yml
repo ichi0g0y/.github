@@ -109,17 +109,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RULESET_SYNC_PAT }}
         run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          # .github のブランチ保護で push できないため --force で常に全適用
+          # state.json のコミットは行わない（ルールセット適用はべき等）
+          ARGS="--force"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python3 apply_rulesets.py $ARGS
-      - name: Commit updated state
-        env:
-          PAT: ${{ secrets.RULESET_SYNC_PAT }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${PAT}@github.com/ichi0g0y/.github.git"
-          git add ruleset-state.json
-          git diff --cached --quiet || git commit -m "chore: update ruleset-state.json [skip ci]"
-          git push
